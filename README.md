@@ -12,6 +12,7 @@ Trình biên tập video gọn nhẹ cho Windows, tập trung vào các thao tá
 - **Âm lượng** theo dB như CapCut (-∞ đến +20 dB, 0 dB = gốc) cho từng clip, có nút tắt tiếng. Nhạc nền đặt trên rãnh âm thanh riêng.
 - **Tốc độ** 0.1x – 10x. Âm thanh giữ nguyên cao độ khi xuất.
 - **Chữ / phụ đề**: chọn phông, cỡ, màu chữ, đậm/nghiêng, viền chữ (màu, độ dày) và hộp nền, độ trong suốt (0–100 %).
+- **Ảnh / logo** (PNG, JPG, WEBP, BMP; giữ nền trong suốt của PNG): nút “🖼 Logo” (Ctrl+L) hoặc kéo tệp ảnh xuống timeline. Logo tự đặt trong **khung tròn** (ảnh không vuông được cắt lấy phần giữa, bỏ phần thừa; bỏ chọn “Khung tròn” trong Thuộc tính để giữ hình gốc). Logo nằm trên rãnh “Mờ / Logo”, kéo trên khung xem trước để di chuyển, kéo góc để đổi cỡ (giữ tỉ lệ), chỉnh độ trong suốt, đặt nhanh vào 4 góc; kéo hai mép trên timeline để đổi thời gian hiện.
 - **Nhiều rãnh (multi-track)** cho chữ/phụ đề và âm thanh, rãnh tự thêm khi cần:
   - Kéo clip lên vùng trống trên cùng (chữ) hoặc xuống vùng trống dưới cùng (âm thanh) để tạo rãnh mới.
   - Thả clip hoặc tệp âm thanh đè lên clip khác: clip tự sang rãnh trống kế tiếp, hết rãnh thì tạo rãnh mới.

@@ -1,14 +1,16 @@
 """Right-hand property panel: volume / speed for clips, text + style for subtitles."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal, QTimer
+import os
+
+from PySide6.QtCore import QEvent, QObject, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QDoubleSpinBox, QFontComboBox, QFormLayout,
+from PySide6.QtWidgets import (QAbstractSlider, QAbstractSpinBox, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSlider,
                                QSpinBox, QStackedWidget, QGridLayout, QSizePolicy, QToolButton, QVBoxLayout, QWidget, QScrollArea)
 
 from .ffmpeg_tools import fmt_time
-from .model import DB_MAX, DB_MIN, BlurClip, Clip, TextClip, TextStyle, db_to_gain, gain_to_db
+from .model import DB_MAX, DB_MIN, BlurClip, Clip, ImageClip, TextClip, TextStyle, db_to_gain, gain_to_db
 
 SPEED_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 5.0]
 
@@ -33,6 +35,22 @@ class ColorButton(QPushButton):
             self.changed.emit(c.name())
 
 
+class _WheelOnlyWhenFocused(QObject):
+    """Spin boxes, sliders and combo boxes react to the mouse wheel only after they
+    were clicked (have focus). Otherwise the wheel scrolls the panel, so moving the
+    mouse across the panel never changes a value by accident."""
+
+    def __init__(self, scroll: QScrollArea):
+        super().__init__(scroll)
+        self._scroll = scroll
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.Wheel and not obj.hasFocus():
+            QApplication.sendEvent(self._scroll.verticalScrollBar(), e)
+            return True
+        return False
+
+
 class Inspector(QWidget):
     before_edit = Signal(str)   # coalescing key -> main window takes undo snapshot
     changed = Signal()          # model changed
@@ -44,6 +62,7 @@ class Inspector(QWidget):
         self.kind = None
         self.group: list = []
         self._loading = False
+        self.canvas_size = lambda: (1920, 1080)   # replaced by the main window (project size)
         self.stack = QStackedWidget()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -65,6 +84,17 @@ class Inspector(QWidget):
         self.stack.addWidget(self._build_clip_page())
         self.stack.addWidget(self._build_text_page())
         self.stack.addWidget(self._build_blur_page())
+        self.stack.addWidget(self._build_image_page())
+
+        # mouse wheel changes a value only after the field was clicked
+        self._wheel_guard = _WheelOnlyWhenFocused(scroll)
+        for w in self.stack.findChildren(QWidget):
+            if isinstance(w, (QAbstractSpinBox, QAbstractSlider, QComboBox)):
+                w.setFocusPolicy(Qt.StrongFocus)     # wheel no longer grabs focus
+                w.installEventFilter(self._wheel_guard)
+        # clicking an empty part of the panel takes focus away from the last field
+        for i in range(self.stack.count()):
+            self.stack.widget(i).setFocusPolicy(Qt.ClickFocus)
 
     # ------------------------------------------------------------ clip page
     def _build_clip_page(self) -> QWidget:
@@ -311,6 +341,126 @@ class Inspector(QWidget):
         v.addStretch(1)
         return w
 
+    # ------------------------------------------------------------ image (logo) page
+    def _build_image_page(self) -> QWidget:
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(12, 8, 12, 8)
+        self.img_name = QLabel()
+        self.img_name.setObjectName("clipName")
+        self.img_name.setWordWrap(True)
+        v.addWidget(self.img_name)
+        hint = QLabel("Kéo logo trên màn hình xem trước để di chuyển, kéo 4 góc để đổi kích thước "
+                      "(giữ nguyên tỉ lệ ảnh). Kéo hai mép trên timeline để đổi thời gian hiện.")
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        v.addWidget(hint)
+
+        self.img_circle = QCheckBox("Khung tròn (tự cắt phần thừa)")
+        self.img_circle.setToolTip("Cắt ảnh thành hình vuông ở giữa rồi bo tròn; phần nằm ngoài vòng tròn bị bỏ.\n"
+                                   "Bỏ chọn để hiện ảnh nguyên hình gốc.")
+        self.img_circle.toggled.connect(self._img_circle)
+        v.addWidget(self.img_circle)
+
+        g = QGroupBox("Độ trong suốt")
+        h = QHBoxLayout(g)
+        self.img_op_slider = QSlider(Qt.Horizontal)
+        self.img_op_slider.setRange(0, 100)
+        self.img_op_spin = QSpinBox()
+        self.img_op_spin.setRange(0, 100)
+        self.img_op_spin.setSuffix(" %")
+        self.img_op_slider.valueChanged.connect(self.img_op_spin.setValue)
+        self.img_op_spin.valueChanged.connect(self.img_op_slider.setValue)
+        self.img_op_spin.valueChanged.connect(lambda x: self._blur("opacity", x / 100))
+        h.addWidget(QLabel("Độ hiện"))
+        h.addWidget(self.img_op_slider, 1)
+        h.addWidget(self.img_op_spin)
+        v.addWidget(g)
+
+        g2 = QGroupBox("Kích thước và vị trí (% khung hình)")
+        fl = QFormLayout(g2)
+        self.img_size = QDoubleSpinBox()
+        self.img_size.setRange(1, 100)
+        self.img_size.setDecimals(1)
+        self.img_size.setSuffix(" %")
+        self.img_size.setToolTip("Chiều rộng logo so với khung hình; chiều cao tự theo tỉ lệ ảnh")
+        self.img_size.valueChanged.connect(self._img_resize)
+        fl.addRow("Rộng", self.img_size)
+        self.ix = QDoubleSpinBox(); self.iy = QDoubleSpinBox()
+        for sp, key, label in ((self.ix, "x", "Trái"), (self.iy, "y", "Trên")):
+            sp.setRange(-50, 150)
+            sp.setDecimals(1)
+            sp.setSuffix(" %")
+            sp.valueChanged.connect(lambda val, key=key: self._blur(key, val / 100))
+            fl.addRow(label, sp)
+        grid = QGridLayout()
+        m = 3.0   # margin from the frame edge, %
+        for i, (label, fx, fy) in enumerate((("↖ Trên trái", 0, 0), ("↗ Trên phải", 1, 0),
+                                              ("↙ Dưới trái", 0, 1), ("↘ Dưới phải", 1, 1))):
+            b = QToolButton(); b.setText(label)
+            b.clicked.connect(lambda _=False, fx=fx, fy=fy: self._img_corner(fx, fy, m))
+            grid.addWidget(b, i // 2, i % 2)
+        fl.addRow(grid)
+        v.addWidget(g2)
+
+        g3 = QGroupBox("Thời gian")
+        fl3 = QFormLayout(g3)
+        self.i_start = QDoubleSpinBox(); self.i_start.setRange(0, 10 ** 7); self.i_start.setDecimals(2); self.i_start.setSuffix(" s")
+        self.i_dur = QDoubleSpinBox(); self.i_dur.setRange(0.05, 10 ** 6); self.i_dur.setDecimals(2); self.i_dur.setSuffix(" s")
+        self.i_start.valueChanged.connect(lambda x: self._blur("start", x))
+        self.i_dur.valueChanged.connect(lambda x: self._blur("duration", x))
+        fl3.addRow("Bắt đầu", self.i_start)
+        fl3.addRow("Thời lượng", self.i_dur)
+        v.addWidget(g3)
+        v.addStretch(1)
+        return w
+
+    def _img_circle(self, on: bool):
+        c = self.clip
+        if self._loading or not isinstance(c, ImageClip) or c.circle == on:
+            return
+        from PySide6.QtGui import QImageReader
+        size = QImageReader(c.path).size()
+        cw, ch = self.canvas_size()
+        self.before_edit.emit(f"imgcircle{c.id}")
+        c.circle = on
+        c.fit_aspect(cw, ch, size.width(), size.height())
+        self.changed.emit()
+        self._load_image_pos()
+
+    def _img_resize(self, pct):
+        c = self.clip
+        if self._loading or not isinstance(c, ImageClip) or c.w <= 0:
+            return
+        nw = pct / 100
+        if abs(nw - c.w) < 1e-6:
+            return
+        ratio = c.h / c.w
+        cx, cy = c.x + c.w / 2, c.y + c.h / 2      # resize around the centre
+        self.before_edit.emit(f"imgsize{c.id}")
+        c.w, c.h = nw, nw * ratio
+        c.x, c.y = cx - c.w / 2, cy - c.h / 2
+        self.changed.emit()
+        self._load_image_pos()
+
+    def _img_corner(self, fx, fy, margin):
+        c = self.clip
+        if not isinstance(c, ImageClip):
+            return
+        self.before_edit.emit(f"imgpos{c.id}")
+        c.x = margin / 100 if fx == 0 else 1 - margin / 100 - c.w
+        c.y = margin / 100 if fy == 0 else 1 - margin / 100 - c.h
+        self.changed.emit()
+        self._load_image_pos()
+
+    def _load_image_pos(self):
+        self._loading = True
+        try:
+            self.ix.setValue(self.clip.x * 100)
+            self.iy.setValue(self.clip.y * 100)
+        finally:
+            self._loading = False
+
     def _blur(self, key, value):
         if self._loading or not isinstance(self.clip, BlurClip):
             return
@@ -339,6 +489,18 @@ class Inspector(QWidget):
         try:
             if clip is None:
                 self._page(0)
+            elif isinstance(clip, ImageClip):
+                self._page(4)
+
+                self.img_name.setText("🖼 " + os.path.basename(clip.path))
+                self.img_name.setToolTip(clip.path)
+                self.img_op_spin.setValue(int(round(clip.opacity * 100)))
+                self.img_circle.setChecked(clip.circle)
+                self.img_size.setValue(clip.w * 100)
+                self.ix.setValue(clip.x * 100)
+                self.iy.setValue(clip.y * 100)
+                self.i_start.setValue(clip.start)
+                self.i_dur.setValue(clip.duration)
             elif isinstance(clip, BlurClip):
                 self._page(3)
                 self.blur_spin.setValue(clip.strength)

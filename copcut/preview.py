@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (QGraphicsItem, QGraphicsObject, QGraphicsRectItem
 from PySide6.QtGui import QImage, QPixmap
 
 from .ffmpeg_tools import fmt_time
-from .model import BlurClip, Project, TextClip
-from .overlays import BlurOverlay, Guides, TextOverlay, blur_radius
+from .model import BlurClip, ImageClip, Project, TextClip
+from .overlays import BlurOverlay, Guides, ImageOverlay, TextOverlay, blur_radius
 
 
 class PreviewView(QGraphicsView):
@@ -358,15 +358,21 @@ class PlaybackEngine(QObject):
         for cid, c in active.items():
             ov = self.blur_overlays.get(cid)
             if ov is None:
-                ov = BlurOverlay(c, self.cw, self.ch, self.guides)
+                is_img = isinstance(c, ImageClip)
+                ov = (ImageOverlay if is_img else BlurOverlay)(c, self.cw, self.ch, self.guides)
                 ov.show_frame = not self.playing
                 ov.selected_hint = self.selection == ("blur", cid)
                 ov.changed.connect(self.blur_changed)
                 ov.clicked.connect(lambda clip: self.overlay_clicked.emit("blur", clip))
-                ov.recompute = lambda o=ov: self._blur_pix(o)
+                if not is_img:
+                    ov.recompute = lambda o=ov: self._blur_pix(o)
                 self.scene.addItem(ov)
                 self.blur_overlays[cid] = ov
                 changed = True
+            elif isinstance(c, ImageClip):
+                ov.refresh()
+                ov.update()          # opacity may have changed
+                continue
             else:
                 old = (QRectF(ov.rect), getattr(ov, "_strength", None))
                 ov.refresh()
@@ -376,11 +382,14 @@ class PlaybackEngine(QObject):
         if changed:
             for ov in self.blur_overlays.values():
                 self._blur_pix(ov)
-        if not self.blur_overlays:
+        if not self._has_blur():
             self._last_img = None
 
+    def _has_blur(self) -> bool:
+        return any(not isinstance(ov, ImageOverlay) for ov in self.blur_overlays.values())
+
     def _on_frame(self, frame):
-        if not self.blur_overlays:
+        if not self._has_blur():
             return
         img = frame.toImage()
         if img.isNull():
@@ -391,6 +400,8 @@ class PlaybackEngine(QObject):
 
     def _blur_pix(self, ov: BlurOverlay):
         """Approximate the export box-blur by down- then up-scaling the covered video area."""
+        if isinstance(ov, ImageOverlay):
+            return
         img = self._last_img
         if img is None or not self.video_item.isVisible():
             ov.set_blur(None, QRectF())

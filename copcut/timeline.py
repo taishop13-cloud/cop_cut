@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import os
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QMimeData, QRect
@@ -13,8 +14,9 @@ from PySide6.QtWidgets import (QHBoxLayout, QMenu, QScrollArea, QScrollBar, QSli
                                QVBoxLayout, QWidget, QLabel, QSizePolicy)
 
 from .cache import PEAK_RATE, ThumbnailCache, WaveformCache
+from . import ffmpeg_tools as ff
 from .ffmpeg_tools import fmt_time
-from .model import Clip, Project, TextClip, fmt_db
+from .model import Clip, ImageClip, Project, TextClip, fmt_db
 
 MEDIA_MIME = "application/x-copcut-media"
 
@@ -45,6 +47,7 @@ C_AUDIO = QColor("#1f5a47")
 C_AUDIO_W = QColor("#4fd3a0")
 C_SUB = QColor("#6a4bc4")
 C_BLUR = QColor("#3f6f8f")
+C_IMAGE = QColor("#8a6a2f")
 C_SEL = QColor("#ffcc33")
 C_ACCENT = QColor("#4f8cff")
 C_PLAYHEAD = QColor("#ffffff")
@@ -666,6 +669,8 @@ class TimelineWidget(QWidget):
             e.acceptProposedAction()
 
     def _drop_target(self, y: float, paths=(), t: float = 0.0) -> tuple[str, int]:
+        if paths and all(ff.is_image(q) for q in paths):
+            return "blur", 0          # images (logos) always go on the overlay lane
         lt = self.lane_track_at(y)
         if lt and lt[0] == "audio":
             lane, track = lt
@@ -750,7 +755,7 @@ class TimelineWidget(QWidget):
         qp.fillRect(QRectF(0, 0, HEADER_W, self.height()), C_HEAD)
         qp.setPen(QColor("#8a91a0"))
         qp.setFont(self._small)
-        names = {"text": "Chữ", "blur": "Che mờ", "main": "Video chính", "audio": "Âm thanh"}
+        names = {"text": "Chữ", "blur": "Mờ / Logo", "main": "Video chính", "audio": "Âm thanh"}
         nt, na = self._lay_key or (1, 1)
         for lane, track, ly, lh in self._lanes:
             label = names[lane]
@@ -952,11 +957,17 @@ class TimelineWidget(QWidget):
                 continue
             last_px[tr] = r.x()
             qp.setPen(Qt.NoPen)
-            qp.setBrush(C_SUB if lane == "text" else C_BLUR)
+            img = isinstance(c, ImageClip)
+            qp.setBrush(C_SUB if lane == "text" else (C_IMAGE if img else C_BLUR))
             qp.drawRoundedRect(r.adjusted(0, 1, -1, -1), 3, 3)
             if r.width() > 24:
                 vis_x = max(r.x(), HEADER_W)
-                label = c.text.replace("\n", " ") if lane == "text" else f"▦ Che mờ {c.strength}"
+                if lane == "text":
+                    label = c.text.replace("\n", " ")
+                elif img:
+                    label = "🖼 " + os.path.basename(c.path)
+                else:
+                    label = f"▦ Che mờ {c.strength}"
                 txt = fm.elidedText(label, Qt.ElideRight, int(r.right() - vis_x - 8))
                 qp.setPen(QColor("#f3efff"))
                 qp.drawText(QRectF(vis_x + 5, r.y(), r.right() - vis_x - 6, r.height()),
@@ -1033,6 +1044,8 @@ class TimelinePanel(QWidget):
         btn("T+ Thêm chữ", "Thêm chữ/phụ đề tại đầu phát", "add_text")
         btn("🗑 Xóa phụ đề", "Xóa toàn bộ phụ đề (Ctrl+Shift+Delete)", "delete_all_text")
         btn("▦ Che mờ", "Thêm vùng che mờ tại đầu phát (Ctrl+M)", "add_blur")
+        btn("🖼 Logo", "Thêm ảnh / logo (PNG, JPG…) tại đầu phát (Ctrl+L)\n"
+            "Hoặc kéo tệp ảnh thả thẳng xuống timeline.", "add_image")
         btn("🔊 Đọc phụ đề", "Chuyển các câu phụ đề thành giọng nói, đặt trên rãnh âm thanh (Ctrl+Shift+T)\n"
             "Ctrl+nhấp / Shift+nhấp trên rãnh chữ để chọn nhiều câu.", "tts")
         bar.addStretch(1)

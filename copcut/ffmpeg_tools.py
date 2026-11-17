@@ -41,7 +41,13 @@ def run(args, timeout=None, **kw) -> subprocess.CompletedProcess:
 AUDIO_EXT = {".mp3", ".wav", ".aac", ".m4a", ".flac", ".ogg", ".opus", ".wma"}
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".wmv", ".m4v",
              ".ts", ".mts", ".m2ts", ".mpg", ".mpeg", ".3gp"}
-MEDIA_EXT = AUDIO_EXT | VIDEO_EXT
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+MEDIA_EXT = AUDIO_EXT | VIDEO_EXT | IMAGE_EXT
+IMAGE_DEFAULT_DUR = 5.0      # seconds an image (logo) covers when first placed
+
+
+def is_image(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in IMAGE_EXT
 
 
 @dataclass
@@ -61,7 +67,13 @@ class MediaInfo:
 
     @property
     def kind(self) -> str:
+        if self.vcodec == "image":
+            return "image"
         return "video" if self.has_video else "audio"
+
+    @property
+    def is_image(self) -> bool:
+        return self.vcodec == "image"
 
     def to_dict(self):
         return asdict(self)

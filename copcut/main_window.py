@@ -6,7 +6,7 @@ import os
 import time
 
 from PySide6.QtCore import Qt, QTimer, QSettings
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QImageReader, QKeySequence
 from PySide6.QtWidgets import (QApplication, QFileDialog, QMainWindow, QMessageBox, QSplitter,
                                QVBoxLayout, QWidget, QProgressDialog, QInputDialog)
 
@@ -15,14 +15,16 @@ from .cache import ThumbnailCache, WaveformCache
 from .export_dialog import ExportDialog
 from .inspector import Inspector
 from .media_bin import MediaBin
-from .model import BlurClip, Clip, Project, TextClip
+from .model import BlurClip, Clip, ImageClip, Project, TextClip
 from .preview import PreviewPanel
 from .subtitles import parse_srt, place_on_source, read_text_file, write_srt
 from .timeline import TimelinePanel, TimelineWidget
 from . import tts
 
 PROJECT_FILTER = "Dự án CopCut (*.copcut)"
-MEDIA_FILTER = ("Media (" + " ".join("*" + e for e in sorted(ff.MEDIA_EXT)) + ");;Tất cả (*.*)")
+MEDIA_FILTER = ("Media (" + " ".join("*" + e for e in sorted(ff.MEDIA_EXT)) + ");;"
+                "Ảnh / logo (" + " ".join("*" + e for e in sorted(ff.IMAGE_EXT)) + ");;Tất cả (*.*)")
+IMAGE_FILTER = ("Ảnh / logo (" + " ".join("*" + e for e in sorted(ff.IMAGE_EXT)) + ");;Tất cả (*.*)")
 
 
 class MainWindow(QMainWindow):
@@ -43,6 +45,7 @@ class MainWindow(QMainWindow):
         self.preview = PreviewPanel(self.project)
         self.engine = self.preview.engine
         self.inspector = Inspector()
+        self.inspector.canvas_size = lambda: (self.project.width, self.project.height)
         self.timeline = TimelineWidget(self.project, self.thumbs, self.waves)
         self.tpanel = TimelinePanel(self.timeline)
 
@@ -134,6 +137,7 @@ class MainWindow(QMainWindow):
         e.addSeparator()
         act(e, "Thêm chữ tại đầu phát", "Ctrl+T", lambda: self._action("add_text"))
         act(e, "Thêm vùng che mờ tại đầu phát", "Ctrl+M", lambda: self._action("add_blur"))
+        act(e, "Thêm ảnh / logo tại đầu phát…", "Ctrl+L", lambda: self._action("add_image"))
         act(e, "Xóa toàn bộ phụ đề…", "Ctrl+Shift+Delete", lambda: self._action("delete_all_text"))
         act(e, "Chuyển phụ đề thành giọng nói…", "Ctrl+Shift+T", lambda: self._action("tts"))
 
@@ -302,6 +306,17 @@ class MainWindow(QMainWindow):
                 if p in self.project.media:
                     ok.append(p)
                     continue
+                if ff.is_image(p):
+                    size = QImageReader(p).size()
+                    if not size.isValid() or size.isEmpty():
+                        errors.append(f"{os.path.basename(p)}: không đọc được ảnh")
+                        continue
+                    info = ff.MediaInfo(p, ff.IMAGE_DEFAULT_DUR, True, False, size.width(),
+                                        size.height(), vcodec="image")
+                    self.project.media[p] = info
+                    self.bin.add(info)
+                    ok.append(p)
+                    continue
                 try:
                     info = ff.probe(p)
                 except Exception as e:  # noqa: BLE001
@@ -334,6 +349,17 @@ class MainWindow(QMainWindow):
         at = self.engine.t if t is None else t
         last = None
         for info in infos:
+            if info.is_image:
+                # logo: top-right corner, in a round frame, 12 % of the frame width
+                c = ImageClip(at, ff.IMAGE_DEFAULT_DUR, 0.0, 0.0, 0.12, 0.12, path=info.path)
+                c.fit_aspect(p.width, p.height, info.width, info.height)
+                if c.h > 0.5:
+                    c.w *= 0.5 / c.h
+                    c.fit_aspect(p.width, p.height, info.width, info.height)
+                c.x, c.y = 1.0 - 0.03 - c.w, 0.04
+                p.blurs.append(c)
+                last = ("blur", c)
+                continue
             if info.has_video and lane != "audio":
                 if not p.main:
                     p.adopt_settings_from(info)
@@ -389,6 +415,18 @@ class MainWindow(QMainWindow):
             return
         if key == "tts":
             return self.text_to_speech()
+        if key == "add_image":
+            start = self.settings.value("last_dir", "")
+            paths, _ = QFileDialog.getOpenFileNames(self, "Chọn ảnh / logo", start, IMAGE_FILTER)
+            if not paths:
+                return
+            self.settings.setValue("last_dir", os.path.dirname(paths[0]))
+            paths = [q for q in self.import_files(paths) if ff.is_image(q)]
+            if paths:
+                self.add_to_timeline(paths, lane="blur", t=t)
+                self.statusBar().showMessage("Đã thêm logo — kéo trên khung xem trước để đặt vị trí, "
+                                             "kéo góc để đổi kích thước; kéo hai mép trên timeline để đổi thời gian", 8000)
+            return
         if key == "add_blur":
             self.checkpoint()
             i = p.main_index_at(t)
@@ -767,6 +805,7 @@ class MainWindow(QMainWindow):
             "Ctrl+nhấp / Shift+nhấp — Chọn nhiều đoạn (phụ đề, âm thanh, video) để xóa,\n"
             "    chỉnh âm lượng hoặc tốc độ cùng lúc; chuột phải → Chọn mọi đoạn trên rãnh\n"
             "Ctrl+M — Thêm vùng che mờ (kéo khung/4 góc trên màn hình xem trước)\n"
+            "Ctrl+L — Thêm ảnh / logo (PNG, JPG…) tại đầu phát\n"
             "Kéo đầu phát gần điểm nối video sẽ tự hút vào (giữ Alt để tắt hút)\n"
             "Ctrl+Z / Ctrl+Y — Hoàn tác / làm lại\n"
             "Ctrl+lăn chuột — Phóng to/thu nhỏ timeline;  lăn chuột — cuộn ngang\n"

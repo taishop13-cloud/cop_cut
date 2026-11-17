@@ -140,7 +140,40 @@ class BlurClip:
 
     @staticmethod
     def from_dict(d) -> "BlurClip":
+        if d.get("path"):
+            return ImageClip.from_dict(d)
         return BlurClip(**{k: d[k] for k in ("start", "duration", "x", "y", "w", "h", "strength") if k in d})
+
+
+@dataclass
+class ImageClip(BlurClip):
+    """A still image (logo) laid over the video. Shares the blur lane and its geometry
+    (normalised x, y, w, h); `strength` is unused. Resizing keeps the image's aspect.
+    With `circle` the image is centre-cropped to a square and masked to a circle."""
+    path: str = ""
+    opacity: float = 1.0     # 0 = invisible, 1 = solid
+    circle: bool = True      # logo shown inside a round frame (extra parts cut off)
+
+    def copy_at(self, start: float, duration: float) -> "ImageClip":
+        return ImageClip(start, duration, self.x, self.y, self.w, self.h, path=self.path,
+                         opacity=self.opacity, circle=self.circle)
+
+    def pixel_aspect(self, img_w: int, img_h: int) -> float:
+        """Width / height of the shown picture in pixels (1 for the round frame)."""
+        if self.circle or img_w <= 0 or img_h <= 0:
+            return 1.0
+        return img_w / img_h
+
+    def fit_aspect(self, canvas_w: int, canvas_h: int, img_w: int, img_h: int):
+        """Set the height from the width so the picture is not stretched; keeps the centre."""
+        cy = self.y + self.h / 2
+        self.h = self.w * canvas_w / max(1, canvas_h) / self.pixel_aspect(img_w, img_h)
+        self.y = cy - self.h / 2
+
+    @staticmethod
+    def from_dict(d) -> "ImageClip":
+        return ImageClip(**{k: d[k] for k in ("start", "duration", "x", "y", "w", "h", "path", "opacity",
+                                              "circle") if k in d})
 
 
 class Project:

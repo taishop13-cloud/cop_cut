@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
-from .model import BlurClip, TextClip
+from .model import BlurClip, ImageClip, TextClip
 
 SNAP_SCREEN_PX = 10          # how close (on screen) the centre must be to snap
 HANDLE_SCREEN_PX = 10
@@ -204,6 +204,7 @@ class BlurOverlay(QGraphicsObject):
         self.selected_hint = False
         self._drag = None
         self.recompute = None             # callable set by the engine to refresh the blur image
+        self.aspect: float | None = None  # width / height to keep while resizing (images)
         self.setAcceptHoverEvents(True)
         self.setZValue(5)
         self.refresh()
@@ -307,6 +308,13 @@ class BlurOverlay(QGraphicsObject):
                 r.setTop(min(r.bottom() - minsz, r.top() + delta.y()))
             if "b" in d["mode"]:
                 r.setBottom(max(r.top() + minsz, r.bottom() + delta.y()))
+            if self.aspect:
+                # keep the picture's proportions: height follows width, opposite corner fixed
+                h = r.width() / self.aspect
+                if "t" in d["mode"]:
+                    r.setTop(r.bottom() - h)
+                else:
+                    r.setBottom(r.top() + h)
         # keep inside the frame
         r = r.intersected(QRectF(-r.width() * 0.5, -r.height() * 0.5,
                                  self.cw + r.width(), self.ch + r.height()))
@@ -327,3 +335,87 @@ class BlurOverlay(QGraphicsObject):
             self.changed.emit(self.clip, r.x() / self.cw, r.y() / self.ch, r.width() / self.cw,
                               r.height() / self.ch)
         self.update()
+
+
+_logo_cache: dict[tuple[str, bool], QImage] = {}
+_pix_cache: dict[tuple[str, bool], QPixmap] = {}
+
+
+def logo_image(path: str, circle: bool) -> QImage:
+    """The picture a logo shows. With `circle` it is centre-cropped to a square (the parts
+    outside are cut off) and everything outside the inscribed circle becomes transparent.
+    QImage only, so the export thread can use it too."""
+    key = (path, circle)
+    img = _logo_cache.get(key)
+    if img is not None:
+        return img
+    img = QImage(path)
+    if not img.isNull():
+        img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+        if circle:
+            side = min(img.width(), img.height())
+            sq = img.copy((img.width() - side) // 2, (img.height() - side) // 2, side, side)
+            out = QImage(side, side, QImage.Format_ARGB32_Premultiplied)
+            out.fill(Qt.transparent)
+            qp = QPainter(out)
+            qp.setRenderHint(QPainter.Antialiasing)
+            path_ = QPainterPath()
+            path_.addEllipse(QRectF(0, 0, side, side))
+            qp.setClipPath(path_)
+            qp.drawImage(0, 0, sq)
+            qp.end()
+            img = out
+    _logo_cache[key] = img
+    return img
+
+
+def logo_pixmap(path: str, circle: bool) -> QPixmap:
+    key = (path, circle)
+    pm = _pix_cache.get(key)
+    if pm is None:
+        pm = QPixmap.fromImage(logo_image(path, circle))
+        _pix_cache[key] = pm
+    return pm
+
+
+class ImageOverlay(BlurOverlay):
+    """A logo / still image: same move + corner-resize as a blur box, keeps its aspect
+    (square when shown in the round frame)."""
+
+    def __init__(self, clip: ImageClip, canvas_w: int, canvas_h: int, guides: Guides):
+        self._circle = None
+        self.image = QPixmap()
+        super().__init__(clip, canvas_w, canvas_h, guides)
+        self.setZValue(6)
+
+    def refresh(self):
+        if self._circle != self.clip.circle:
+            self._circle = self.clip.circle
+            self.image = logo_pixmap(self.clip.path, self.clip.circle)
+            self.aspect = (self.image.width() / self.image.height()
+                           if not self.image.isNull() and self.image.height() else None)
+            self.update()
+        super().refresh()
+
+    def paint(self, qp: QPainter, opt, widget=None):
+        if self.image.isNull():
+            qp.fillRect(self.rect, QColor(160, 60, 60, 170))
+            qp.setPen(QColor("#ffffff"))
+            qp.drawText(self.rect, Qt.AlignCenter, "Không tìm thấy ảnh")
+        else:
+            qp.save()
+            qp.setOpacity(max(0.0, min(1.0, self.clip.opacity)))
+            qp.setRenderHint(QPainter.SmoothPixmapTransform)
+            qp.drawPixmap(self.rect, self.image, QRectF(self.image.rect()))
+            qp.restore()
+        if not self.show_frame or not (self.selected_hint or self._drag):
+            return
+        pen = QPen(C_SEL, 1.5, Qt.DashLine)
+        pen.setCosmetic(True)
+        qp.setPen(pen)
+        qp.setBrush(Qt.NoBrush)
+        qp.drawRect(self.rect)
+        hs = HANDLE_SCREEN_PX / _view_scale(self)
+        qp.setBrush(QColor("#ffffff"))
+        for pt in self._corners().values():
+            qp.drawRect(QRectF(pt.x() - hs / 2, pt.y() - hs / 2, hs, hs))

@@ -21,7 +21,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from . import ffmpeg_tools as ff
-from .model import Clip, Project
+from .model import Clip, ImageClip, Project
 from .overlays import blur_radius
 from .subtitles import build_ass
 
@@ -84,7 +84,7 @@ def can_fast_copy(p: Project) -> tuple[bool, str]:
     if p.texts:
         return False, "Có phụ đề/chữ (cần mã hóa lại để in chữ lên hình)."
     if p.blurs:
-        return False, "Có vùng che mờ (cần mã hóa lại)."
+        return False, "Có vùng che mờ hoặc logo (cần mã hóa lại)."
     if p.audio:
         return False, "Có nhạc nền trên rãnh âm thanh."
     if any(abs(c.speed - 1) > 1e-6 or abs(c.volume - 1) > 1e-6 for c in p.main):
@@ -101,11 +101,15 @@ def _q(path: str) -> str:
 
 
 def _blur_filters(p: Project, st: ExportSettings, offset: float, seg_dur: float,
-                  label: str) -> tuple[list[str], str]:
-    """Chain one crop+boxblur+overlay per blur box overlapping [offset, offset+seg_dur)."""
+                  label: str, logos: dict | None = None) -> tuple[list[str], str]:
+    """Chain one crop+boxblur+overlay per blur box overlapping [offset, offset+seg_dur),
+    then one overlay per image (logo) so logos sit on top of blurred areas."""
     W, H = st.width, st.height
     out, cur = [], label
-    for k, b in enumerate(p.blurs_in(offset, offset + seg_dur)):
+    items = p.blurs_in(offset, offset + seg_dur)
+    for k, b in enumerate(items):
+        if isinstance(b, ImageClip):
+            continue
         x0 = max(0, int(round(b.x * W)))
         y0 = max(0, int(round(b.y * H)))
         x1 = min(W, int(round((b.x + b.w) * W)))
@@ -126,11 +130,32 @@ def _blur_filters(p: Project, st: ExportSettings, offset: float, seg_dur: float,
         out.append(f"[{nxt}c]crop={w}:{h}:{x0}:{y0},boxblur=lr={lr}:lp=2:cr={cr}:cp=2:{en}[{nxt}b]")
         out.append(f"[{nxt}m][{nxt}b]overlay={x0}:{y0}:{en}[{nxt}]")
         cur = nxt
+    for k, b in enumerate(items):
+        if not isinstance(b, ImageClip) or b.opacity <= 0:
+            continue
+        src = (logos or {}).get(b.id, b.path)     # round-frame logos are pre-rendered PNGs
+        if not os.path.isfile(src):
+            continue
+        w = max(2, int(round(b.w * W)))
+        h = max(2, int(round(b.h * H)))
+        x = int(round(b.x * W))
+        y = int(round(b.y * H))
+        t0 = max(b.start, offset) - offset
+        t1 = min(b.end, offset + seg_dur) - offset
+        chain = f"movie=filename={_fesc(src)},scale={w}:{h}:flags=lanczos,format=rgba"
+        if b.opacity < 0.999:
+            chain += f",colorchannelmixer=aa={b.opacity:.3f}"
+        nxt = f"lg{k}"
+        out.append(f"{chain}[{nxt}i]")
+        out.append(f"[{cur}][{nxt}i]overlay={x}:{y}:eof_action=repeat:format=auto:"
+                   f"enable='between(t,{t0:.4f},{t1:.4f})',format=yuv420p[{nxt}]")
+        cur = nxt
     return out, cur
 
 
 def _segment_graph(p: Project, clips: list[Clip], st: ExportSettings, first_input: int,
-                   subs_file: str | None, offset: float) -> tuple[list[str], str, str, str]:
+                   subs_file: str | None, offset: float,
+                   logos: dict | None = None) -> tuple[list[str], str, str, str]:
     """Return (input args, filter_complex, video label, audio label)."""
     inputs, fl, cat = [], [], []
     W, H, fps = st.width, st.height, st.fps
@@ -156,7 +181,7 @@ def _segment_graph(p: Project, clips: list[Clip], st: ExportSettings, first_inpu
                       f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{k}]")
         cat.append(f"[v{k}][a{k}]")
     fl.append(f"{''.join(cat)}concat=n={len(clips)}:v=1:a=1[vcat][acat]")
-    blur_f, vlab = _blur_filters(p, st, offset, sum(c.duration for c in clips), "vcat")
+    blur_f, vlab = _blur_filters(p, st, offset, sum(c.duration for c in clips), "vcat", logos)
     fl += blur_f
     if subs_file:
         if offset:
@@ -265,6 +290,25 @@ def _music_graph(p: Project, first_input: int, main_audio: str, end: float) -> t
     return inputs, ";".join(fl), "amix"
 
 
+def _render_logos(p: Project, tmp: Path) -> dict[int, str]:
+    """Save each round-frame logo (cropped + circle mask, same as the preview) as a PNG."""
+    from .overlays import logo_image
+    out, done = {}, {}
+    for b in p.blurs:
+        if not isinstance(b, ImageClip) or not b.circle or not os.path.isfile(b.path):
+            continue
+        f = done.get(b.path)
+        if f is None:
+            img = logo_image(b.path, True)
+            if img.isNull():
+                continue
+            f = str(tmp / f"logo{len(done)}.png")
+            img.save(f, "PNG")
+            done[b.path] = f
+        out[b.id] = f
+    return out
+
+
 def build_jobs(p: Project, st: ExportSettings, tmp: Path) -> list[Job]:
     if not ff.FFMPEG:
         raise RuntimeError("Không tìm thấy ffmpeg.")
@@ -290,8 +334,10 @@ def build_jobs(p: Project, st: ExportSettings, tmp: Path) -> list[Job]:
             build_ass(p.texts, st.width, st.height, scale=scale, t1=total), encoding="utf-8")
         subs = "subs.ass"
 
+    logos = _render_logos(p, tmp)
+
     if len(p.main) <= CHUNK_CLIPS:
-        inp, graph, vl, al = _segment_graph(p, p.main, st, 0, subs, 0.0)
+        inp, graph, vl, al = _segment_graph(p, p.main, st, 0, subs, 0.0, logos)
         minp, mgraph, al = _music_graph(p, len(p.main), al, total)
         if mgraph:
             graph += ";" + mgraph
@@ -310,7 +356,7 @@ def build_jobs(p: Project, st: ExportSettings, tmp: Path) -> list[Job]:
         clips = p.main[a:b]
         offset = starts[a]
         dur = sum(c.duration for c in clips)
-        inp, graph, vl, al = _segment_graph(p, clips, st, 0, subs, offset)
+        inp, graph, vl, al = _segment_graph(p, clips, st, 0, subs, offset, logos)
         gname = f"graph{ci}.txt"
         (tmp / gname).write_text(graph, encoding="utf-8")
         out = tmp / f"part{ci:04d}.mkv"

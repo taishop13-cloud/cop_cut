@@ -74,7 +74,7 @@ class MediaBin(QWidget):
         b.clicked.connect(self.import_requested)
         row.addWidget(b)
         b2 = QPushButton("Thêm vào timeline")
-        b2.setToolTip("Video → nối vào cuối rãnh chính; âm thanh → đặt tại đầu phát")
+        b2.setToolTip("Video → nối vào cuối rãnh chính; âm thanh / ảnh (logo) → đặt tại đầu phát")
         b2.clicked.connect(self._add_selected)
         row.addWidget(b2)
         lay.addLayout(row)
@@ -101,12 +101,19 @@ class MediaBin(QWidget):
         if info.path in self.items:
             return
         name = info.path.replace("\\", "/").rsplit("/", 1)[-1]
-        it = QListWidgetItem(f"{name}\n{fmt_time(info.duration)}")
+        sub = f"Ảnh {info.width}×{info.height}" if info.is_image else fmt_time(info.duration)
+        it = QListWidgetItem(f"{name}\n{sub}")
         it.setData(Qt.UserRole, info.path)
         it.setData(Qt.UserRole + 1, info.has_video)
         it.setToolTip(f"{info.path}\n{info.width}×{info.height}  {info.fps:.2f} fps" if info.has_video
                       else info.path)
         it.setIcon(self._placeholder(info.has_video))
+        if info.is_image:
+            pm = QPixmap(info.path)
+            if not pm.isNull():
+                it.setIcon(QIcon(pm.scaled(128, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            it.setData(Qt.UserRole + 2, True)     # no video thumbnail needed
+            it.setToolTip(f"{info.path}\n{info.width}×{info.height} — nháy đúp để thêm làm logo")
         self.list.addItem(it)
         self.items[info.path] = it
         self._refresh_icons()
