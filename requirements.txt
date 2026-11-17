@@ -1,0 +1,5 @@
+PySide6-Essentials==6.12.0
+PySide6-Addons==6.12.0
+numpy>=1.24
+edge-tts>=7.0
+piper-tts>=1.3
